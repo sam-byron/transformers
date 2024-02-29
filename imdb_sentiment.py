@@ -60,7 +60,7 @@ out = gpt_model(**encoded_input)
 hidden_size = out['last_hidden_state'].shape[2]
 summary(gpt_model, input_data=[encoded_input["input_ids"]], device="cpu")
 
-def encode_transform_batch(device, tokenizer, model, hidden_size):
+def encode_transform_batch(device, tokenizer, hidden_size):
 
     text_pipeline = lambda x: [sentence[1] for sentence in x]
     if parse_version(torchtext.__version__) > parse_version("0.10"):
@@ -69,21 +69,20 @@ def encode_transform_batch(device, tokenizer, model, hidden_size):
         label_pipeline = lambda x: 1. if x == 'pos' else 0.
 
     def collate_fn(batch):
-        with torch.no_grad():
-            model.eval()
-            encoded_inputs = text_pipeline(batch)
-            encoded_inputs = tokenizer(encoded_inputs, return_tensors='pt', max_length = max_seq_len-1, padding=True, truncation=True)
-            encoded_inputs.to(device)
-            # model.to("cpu")
-            # encoded_inputs.to("cpu")
-            out = model(**encoded_inputs)
-            all_data = out['last_hidden_state'][:,-1,:]
-            label_list = []
-            # all_data_tensor = torch.empty((0, hidden_size), dtype=torch.float32)
-            # all_data_tensor = torch.cat((all_data_tensor.to(device), out['last_hidden_state'][:,-1,:].detach()), 0)
-            # all_data_tensor = torch.empty((0, max_seq_len-1, hidden_size), dtype=torch.float32)
-            # all_data_tensor = torch.cat((all_data_tensor.to(device), out['last_hidden_state'].detach()), 0)
-            # all_data_tensor.to(device)
+        encoded_inputs = text_pipeline(batch)
+        encoded_inputs = tokenizer(encoded_inputs, return_tensors='pt', max_length = min(max_seq_len-1, len(max(encoded_inputs))), padding=True, truncation=True)
+        # encoded_inputs = tokenizer(encoded_inputs, return_tensors='pt', truncation=True)
+        # encoded_inputs.to(device)
+        # model.to("cpu")
+        # encoded_inputs.to("cpu")
+        # out = model(**encoded_inputs)
+        # all_data = out['last_hidden_state'][:,-1,:]
+        label_list = []
+        # all_data_tensor = torch.empty((0, hidden_size), dtype=torch.float32)
+        # all_data_tensor = torch.cat((all_data_tensor.to(device), out['last_hidden_state'][:,-1,:].detach()), 0)
+        # all_data_tensor = torch.empty((0, max_seq_len-1, hidden_size), dtype=torch.float32)
+        # all_data_tensor = torch.cat((all_data_tensor.to(device), out['last_hidden_state'].detach()), 0)
+        # all_data_tensor.to(device)
         for _label, _text in batch:
             label_list.append(label_pipeline(_label))
             # encoded_input = tokenizer(_text, return_tensors='pt')
@@ -97,19 +96,19 @@ def encode_transform_batch(device, tokenizer, model, hidden_size):
         label_list = torch.tensor(label_list)
         # padded_text_list = nn.utils.rnn.pad_sequence(text_list, batch_first=True)
         # return padded_text_list.to(device), label_list.to(device)
-        return all_data.to(device), label_list.to(device)
+        return encoded_inputs.to(device), label_list.to(device)
     
     return collate_fn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gpt_model.to(device)
-collate_fn = encode_transform_batch(device, tokenizer, gpt_model, hidden_size)
+collate_fn = encode_transform_batch(device, tokenizer, hidden_size)
 
 
 
 ## Step 4: batching the datasets
 
-batch_size = 8
+batch_size = 16
 
 train_dl = DataLoader(train_dataset, batch_size=batch_size,
                       shuffle=True, collate_fn=collate_fn)
@@ -129,10 +128,14 @@ class MLP(nn.Module):
         self.sigmoid = nn.Sigmoid()
         self.loss_fn = loss_fn
         self.gpt_model = gpt_model
+        self.gpt_model.eval()
         # self.optimizer = optimizer
 
     def forward(self, input):
-        x = torch.flatten(input, start_dim=1)
+        with torch.no_grad():
+            x = self.gpt_model(**input)
+        x = x['last_hidden_state'][:,-1,:]
+        # x = torch.flatten(x, start_dim=1)
         x = self.fc1(x)
         x = self.relu(x)
         x = self.fc2(x)
@@ -162,7 +165,8 @@ class MLP(nn.Module):
                 loss = self.loss_fn(pred.squeeze(-1), label_batch)
                 total_acc += ((pred>=0.5).float() == label_batch).float().sum().item()
                 total_loss += loss.item()*label_batch.size(0)
-        return total_acc/size, total_loss/size
+        # return total_acc/size, total_loss/size
+        return total_acc/len(dataloader.dataset), total_loss/len(dataloader.dataset)
     
     def train_epochs(self, num_epochs, train_dl, valid_dl, valid_size):
         for epoch in range(num_epochs):
@@ -182,13 +186,13 @@ model.optimizer = optimizer
 print(model) 
  
 model.to(device)
-num_epochs = 1
-# model.train_epochs(num_epochs, train_dl, valid_dl, valid_size)
+num_epochs = 5
+model.train_epochs(num_epochs, train_dl, valid_dl, valid_size)
 
 # DEBUG
-with profile(activities=[
-        ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
-    with record_function("model_training"):
-        model.train_epochs(num_epochs, train_dl, valid_dl, valid_size)
+# with profile(activities=[
+#         ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+#     with record_function("model_training"):
+#         model.train_epochs(num_epochs, train_dl, valid_dl, valid_size)
 
-print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
+# print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
